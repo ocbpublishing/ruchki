@@ -1,0 +1,169 @@
+import pygame
+import math
+import random
+import numpy as np
+import os
+
+WIDTH, HEIGHT = 1200, 800
+FPS = 60
+
+ROAD_COLOR = (50, 50, 50)
+BG_COLOR = (30, 100, 30)
+TIRE_COLOR = (10, 10, 10)
+TEXT_COLOR = (255, 255, 255)
+
+pygame.init()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("ШІ Автопілот: Овальна траса та перешкоди")
+clock = pygame.time.Clock()
+
+def create_procedural_track():
+    surf = pygame.Surface((WIDTH, HEIGHT))
+    surf.fill(BG_COLOR)
+    
+    outer_rect = pygame.Rect(100, 100, WIDTH - 200, HEIGHT - 200)
+    pygame.draw.ellipse(surf, ROAD_COLOR, outer_rect)
+    
+    inner_rect = pygame.Rect(250, 250, WIDTH - 500, HEIGHT - 500)
+    pygame.draw.ellipse(surf, BG_COLOR, inner_rect)
+    
+    for _ in range(12):
+        angle = random.uniform(0, math.pi * 2)
+        r_x = (WIDTH - 350) / 2 * random.uniform(0.8, 1.0)
+        r_y = (HEIGHT - 350) / 2 * random.uniform(0.8, 1.0)
+        tx = WIDTH // 2 + math.cos(angle) * r_x
+        ty = HEIGHT // 2 + math.sin(angle) * r_y
+        pygame.draw.circle(surf, TIRE_COLOR, (int(tx), int(ty)), 15)
+        pygame.draw.circle(surf, (60, 60, 60), (int(tx), int(ty)), 15, 2)
+        
+    return surf
+
+class Network:
+    def __init__(self, weights=None):
+        if weights:
+            self.w1, self.w2 = weights
+        else:
+            self.w1 = np.random.rand(5, 10) - 0.5
+            self.w2 = np.random.rand(10, 2) - 0.5
+
+    def predict(self, inputs):
+        h = np.tanh(np.dot(inputs, self.w1))
+        return np.tanh(np.dot(h, self.w2))
+
+class Car:
+    def __init__(self, car_img, brain=None):
+        if car_img:
+            self.original_img = car_img
+        else:
+            self.original_img = pygame.Surface((40, 20), pygame.SRCALPHA)
+            pygame.draw.rect(self.original_img, (0, 255, 0), (0, 0, 40, 20))
+        
+        self.img = self.original_img
+        self.pos = pygame.math.Vector2(WIDTH // 2, 175)
+        self.angle = 0
+        self.speed = 5
+        self.alive = True
+        self.brain = brain if brain else Network()
+        self.distance = 0
+        self.sensors = [0, 0, 0, 0, 0]
+        self.time_lived = 0
+
+    def update(self, track_mask):
+        if not self.alive: return
+        
+        self.time_lived += 1
+        inputs = np.array(self.sensors)
+        output = self.brain.predict(inputs)
+        
+        self.angle += output[0] * 8
+        
+        rotation = math.radians(self.angle)
+        velocity = pygame.math.Vector2(math.cos(rotation), math.sin(rotation)) * self.speed
+        self.pos += velocity
+        self.distance += self.speed
+        
+        self.img = pygame.transform.rotate(self.original_img, -self.angle)
+        self.rect = self.img.get_rect(center=(round(self.pos.x), round(self.pos.y)))
+        
+        if self.check_collision(track_mask):
+            self.alive = False
+
+    def check_collision(self, track_mask):
+        x, y = int(self.pos.x), int(self.pos.y)
+        if not (0 <= x < WIDTH and 0 <= y < HEIGHT): return True
+        pixel = track_mask.get_at((x, y))
+        return pixel == BG_COLOR or pixel == TIRE_COLOR
+
+    def cast_sensors(self, track_mask):
+        for i, angle_off in enumerate([-60, -30, 0, 30, 60]):
+            ray_angle = math.radians(self.angle + angle_off)
+            dist = 0
+            while dist < 180:
+                dist += 4
+                x = int(self.pos.x + math.cos(ray_angle) * dist)
+                y = int(self.pos.y + math.sin(ray_angle) * dist)
+                if not (0 <= x < WIDTH and 0 <= y < HEIGHT) or track_mask.get_at((x, y)) == BG_COLOR or track_mask.get_at((x, y)) == TIRE_COLOR:
+                    break
+            self.sensors[i] = dist / 180.0
+
+    def draw(self, surf):
+        surf.blit(self.img, self.rect)
+
+def mutate(brain):
+    w1 = brain.w1 + (np.random.rand(5, 10) - 0.5) * 0.15
+    w2 = brain.w2 + (np.random.rand(10, 2) - 0.5) * 0.15
+    return Network((w1, w2))
+
+car_sprite = None
+if os.path.exists("car.png"):
+    car_sprite = pygame.image.load("car.png").convert_alpha()
+    car_sprite = pygame.transform.scale(car_sprite, (40, 20))
+
+track_surf = create_procedural_track()
+cars = [Car(car_sprite) for _ in range(30)]
+gen = 1
+top_dist = 0
+
+while True:
+    screen.blit(track_surf, (0, 0))
+    
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            pygame.quit()
+            exit()
+
+    alive_cars = [c for c in cars if c.alive]
+
+    if not alive_cars or all(c.time_lived > 2000 for c in alive_cars):
+        cars.sort(key=lambda x: x.distance, reverse=True)
+        if cars[0].distance > top_dist: top_dist = cars[0].distance
+        
+        best_brains = [c.brain for c in cars[:5]]
+        new_cars = []
+        for i in range(25):
+            parent = random.choice(best_brains)
+            new_cars.append(Car(car_sprite, mutate(parent)))
+        for b in best_brains:
+            new_cars.append(Car(car_sprite, b))
+            
+        cars = new_cars
+        gen += 1
+        continue
+
+    for car in alive_cars:
+        car.cast_sensors(track_surf)
+        car.update(track_surf)
+        car.draw(screen)
+
+    font = pygame.font.SysFont("Consolas", 18, True)
+    info = [
+        f"ПОКОЛІННЯ: {gen}",
+        f"ЖИВИХ МАШИН: {len(alive_cars)}",
+        f"КРАЩА ДИСТАНЦІЯ: {int(top_dist)}"
+    ]
+    for i, text in enumerate(info):
+        render = font.render(text, True, TEXT_COLOR)
+        screen.blit(render, (20, 20 + i * 25))
+    
+    pygame.display.flip()
+    clock.tick(FPS)
